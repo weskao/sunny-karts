@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Game, Track, DT, idle } from "../src/game.ts";
+import { Game, Track, DT, idle, angle, clamp } from "../src/game.ts";
 
 test("countdown gates motion and timers, then resets all six racers", () => {
   const g = new Game();
@@ -106,6 +106,9 @@ test("sustained drift earns finite nitro; brake, recovery, and wall contacts rem
   const p = g.track.at(k.s);
   k.x = p.x + p.nx * 20;
   k.z = p.z + p.nz * 20;
+  k.yaw = k.moveYaw = p.yaw + Math.PI / 4;
+  k.speed = 20;
+  k.hit = 0;
   g.step(idle);
   assert.ok(Math.abs(g.track.nearest(k.x, k.z).lateral) < g.track.width / 2);
   assert.ok(Number.isFinite(k.yaw));
@@ -186,4 +189,80 @@ test("pause freezes race simulation and empty nitro cannot boost", () => {
   g.pause();
   g.step({ ...idle, throttle: 1, boost: true });
   assert.equal(g.karts[0].boostTime, 0);
+});
+
+test("drift has a bounded slip angle, responds to correction, and resets its feedback", () => {
+  const g = new Game(), k = g.karts[0];
+  g.track.width = 1000; // Isolate handling from barriers.
+  k.speed = 27;
+  g.drive(k, { ...idle, throttle: 1, steer: 1, drift: true });
+  assert.equal(k.driftState, "DRIFT_ENTER");
+  for (let i = 0; i < 60; i++) g.drive(k, { ...idle, throttle: 1, steer: 1, drift: true });
+  assert.equal(k.driftState, "DRIFT");
+  assert.ok(k.driftAngle > 0.25 && k.driftAngle < 0.65, `bounded slip: ${k.driftAngle}`);
+  assert.ok(k.driftQuality > 0.5 && k.charge > 0.15);
+  const slip = k.driftAngle;
+  for (let i = 0; i < 18; i++) g.drive(k, { ...idle, throttle: 1, steer: -1, drift: true });
+  assert.ok(k.driftAngle < slip * 0.75, "counter-steering must reduce slip");
+  g.drive(k, { ...idle, throttle: 1 });
+  assert.equal(k.driftState, "DRIFT_EXIT");
+  assert.ok(k.miniTime > 0, "a good exit rewards acceleration");
+  for (let i = 0; i < 35; i++) g.drive(k, { ...idle, throttle: 1 });
+  assert.equal(k.driftState, "GRIP");
+  assert.ok(k.driftAngle < 0.02);
+  g.respawn(k);
+  assert.equal(k.driftQuality, 0);
+  assert.equal(k.driftDuration, 0);
+  assert.equal(k.driftAngle, 0);
+});
+
+test("nitro rapidly exceeds cruising speed and fades without a speed snap", () => {
+  const g = new Game(), k = g.karts[0];
+  g.track.width = 1000;
+  k.speed = k.maxSpeed;
+  k.nitro = 1;
+  for (let i = 0; i < 60; i++) g.drive(k, { ...idle, throttle: 1, boost: true });
+  assert.ok(k.speed > k.maxSpeed + 12, "nitro must give a large speed burst within one second");
+  while (k.boostTime > 0) {
+    const before = k.speed;
+    g.drive(k, { ...idle, throttle: 1 });
+    assert.ok(Math.abs(k.speed - before) < 0.6, "no sudden speed loss when boost expires");
+  }
+  assert.equal(k.nitro, 0);
+});
+
+test("a clean drift-exit kick still accelerates at normal cruising speed", () => {
+  const g = new Game(), k = g.karts[0];
+  g.track.width = 1000;
+  k.speed = k.maxSpeed;
+  for (let i = 0; i < 65; i++) g.drive(k, { ...idle, throttle: 1, steer: 0.5, drift: true });
+  for (let i = 0; i < 12; i++) g.drive(k, { ...idle, throttle: 1 });
+  assert.ok(k.speed > k.maxSpeed + 1, "exit kick must not be swallowed by the normal speed cap");
+  assert.equal(k.nitro, 0, "mini boost does not grant stored nitro");
+});
+
+test("a drift-aware racing line completes three laps with earned boosts and no wall impacts", () => {
+  const g = new Game();
+  g.start();
+  let driftTicks = 0, boosts = 0;
+  for (let i = 0; i < 60 * 300 && !g.karts[0].finished; i++) {
+    const k = g.karts[0], n = g.track.nearest(k.x, k.z, k.s);
+    const p = g.track.at(n.s + 9 + Math.abs(k.speed) * 0.6);
+    const curve = angle(g.track.at(n.s + 26).yaw - n.yaw) / 26;
+    const input = g.aiInput(k);
+    input.drift = k.speed > 18 && Math.abs(curve) > 0.005 && Math.abs(curve) < 0.026;
+    if (input.drift) {
+      const sign = k.drift ? k.driftSign : Math.sign(curve);
+      const target = Math.atan2(p.x + p.nx * k.lane - k.x, p.z + p.nz * k.lane - k.z);
+      input.steer = clamp(angle(target + sign * 0.34 - k.yaw) * 3.3 / g.turnRate(k) / 1.2, -1, 1);
+      driftTicks++;
+    }
+    g.step(input);
+    boosts += g.events.filter((e) => e === "boost").length;
+    g.events.length = 0;
+  }
+  assert.ok(g.karts[0].finished);
+  assert.equal(g.karts[0].laps, 3);
+  assert.equal(g.karts[0].wallHits, 0);
+  assert.ok(driftTicks > 60 * 30 && boosts >= 3, `drift ticks ${driftTicks}, earned boosts ${boosts}`);
 });
