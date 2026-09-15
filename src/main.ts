@@ -13,7 +13,7 @@ app.innerHTML = `
     <div class="timing"><div class="lap-box"><span class="eyebrow">LAP</span><strong id="lap">1 <small>/ 3</small></strong></div><div class="time-box"><div><span>RACE</span><b id="time">00:00.000</b></div><div><span>LAP</span><b id="lap-time">00:00.000</b></div><div><span>BEST</span><b id="best">—</b></div></div></div>
     <div class="map-card"><div class="eyebrow">SUNBEAM CIRCUIT <span>↗</span></div><canvas id="map" width="260" height="180" aria-label="Circuit minimap"></canvas><div class="map-caption"><span class="player-dot"></span> YOU <span>3 LAPS · <span id="track-length"></span> KM</span></div></div>
     <div class="driving-help"><kbd>WASD</kbd> DRIVE <span>·</span> <kbd>SHIFT</kbd> DRIFT <span>·</span> <kbd>R</kbd> RECOVER</div>
-    <div class="boost-card"><div class="boost-heading"><span id="boost-label">DRIFT TO CHARGE</span><span id="drift-status">BUILD YOUR BURST</span></div><div class="boost-track"><div id="boost-fill"></div><i></i><i></i><i></i></div><div class="nitro-row"><div id="nitro-slots"><span class="nitro-slot">ϟ</span><span class="nitro-slot">ϟ</span></div><div><kbd>CTRL</kbd> <span id="nitro-hint">NITRO BOOST</span></div></div></div>
+    <div class="boost-card"><div class="boost-heading"><span id="boost-label">DRIFT TO CHARGE</span><span id="drift-status">BUILD YOUR BURST</span></div><div class="boost-track" role="progressbar" aria-label="Drift charge" aria-valuemin="0" aria-valuemax="100"><div id="boost-fill"></div><i></i><i></i><i></i></div><div class="nitro-row"><div id="nitro-slots" aria-label="Stored nitro"><span class="nitro-slot">ϟ</span><span class="nitro-slot">ϟ</span></div><div><kbd>CTRL</kbd> <span id="nitro-hint">NITRO BOOST</span></div></div><div class="burst-timer"><div id="burst-fill"></div></div></div>
     <div class="speed-card"><span id="speed">0</span><span class="speed-unit">KM/H</span><div class="speed-ticks">▰ ▰ ▰ ▰ ▰ ▰ ▰ ▰ ▰ ▰</div></div>
   </section>
   <div id="countdown" role="status" aria-live="assertive"></div><div id="toast" role="status"></div>
@@ -24,7 +24,7 @@ app.innerHTML = `
   </section>
   <section id="paused" class="screen modal-screen hidden" aria-label="Pause menu"><div class="modal"><div class="pill">TAKE A BREATHER</div><h2>PIT STOP<span>.</span></h2><p>Your sunshine isn’t going anywhere.</p><button id="resume" class="primary">BACK TO THE RACE <span>↗</span></button><button id="pause-restart" class="secondary">RESTART RACE</button></div></section>
   <section id="finished" class="screen modal-screen hidden" aria-label="Race results"><div class="modal finish-modal"><div class="pill">THREE LAPS. ALL SMILES.</div><h2>FINISH<span>!</span></h2><div class="result-place"><strong id="finish-place">1st</strong><span>OUT OF 6 RACERS</span></div><div class="result-stats"><div><span>TOTAL TIME</span><b id="finish-time"></b></div><div><span>BEST LAP</span><b id="finish-best"></b></div></div><div id="lap-results"></div><button id="restart" class="primary">ONE MORE RACE <span>↗</span></button><p class="result-tip">A clean drift is just the beginning.</p></div></section>
-  <footer><span>ORIGINAL ARCADE RACING <span class="footer-star">✳</span> PHASE 01</span><div><button id="music" aria-pressed="true">♫ MUSIC ON</button><button id="sound" aria-pressed="true">◖ SOUND ON</button><button id="quality" aria-pressed="true">HIGH QUALITY</button></div></footer>
+  <footer><span>ORIGINAL ARCADE RACING <span class="footer-star">✳</span> SUNBEAM FESTIVAL</span><div><button id="music" aria-pressed="true">♫ MUSIC ON</button><button id="sound" aria-pressed="true">◖ SOUND ON</button><button id="quality" aria-pressed="true">HIGH QUALITY</button></div></footer>
 `;
 const el = (id: string) => document.getElementById(id)!;
 export const game = new Game();
@@ -40,8 +40,8 @@ try {
 }
 game.state = "READY";
 const keys = new Set<string>();
-let starting = false,
-  lastState = "",
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let lastState = "",
   toastTime = 0,
   goTime = 0,
   accumulator = 0,
@@ -61,15 +61,9 @@ function toast(text: string) {
   toastTime = 2.2;
   el("toast").classList.add("show");
 }
-async function start() {
-  if (starting) return;
-  starting = true;
-  try {
-    await audio.start();
-  } catch {
-    toast("Audio unavailable — the race is still ready.");
-  }
-  keys.clear();
+function start() {
+  // Audio must never gate the race: a blocked AudioContext leaves resume() pending forever.
+  audio.start().catch(() => toast("Audio unavailable — the race is still ready."));
   game.start();
   world.clearEffects();
   world.snapCamera();
@@ -77,12 +71,10 @@ async function start() {
   goTime = 0;
   toastTime = 0;
   lastState = "";
-  starting = false;
   (document.activeElement as HTMLElement)?.blur();
 }
 function pause() {
   game.pause();
-  keys.clear();
   audio.setPaused(game.state === "PAUSED");
   accumulator = 0;
 }
@@ -126,8 +118,9 @@ const controlCodes = [
 ];
 window.addEventListener("keydown", (e) => {
   if (controlCodes.includes(e.code)) e.preventDefault();
-  if (e.repeat) return;
   keys.add(e.code);
+  // Track held controls on repeats; only one-shot actions ignore them.
+  if (e.repeat) return;
   if (
     e.code === "Enter" &&
     (game.state === "READY" || game.state === "FINISHED")
@@ -149,6 +142,7 @@ window.addEventListener("blur", () => {
   if (game.state === "RACING" || game.state === "COUNTDOWN") pause();
 });
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden) keys.clear();
   if (
     document.hidden &&
     (game.state === "RACING" || game.state === "COUNTDOWN")
@@ -160,9 +154,11 @@ function input(): Input {
   return {
     throttle: keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0,
     brake: keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0,
+    // Positive steer increases yaw, which turns left — the convention aiInput()
+    // and the front-wheel visuals already use. Left must therefore be positive.
     steer:
-      (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) -
-      (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0),
+      (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) -
+      (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0),
     drift: keys.has("ShiftLeft") || keys.has("ShiftRight"),
     boost: keys.has("ControlLeft") || keys.has("ControlRight"),
   };
@@ -242,7 +238,10 @@ function updateUI() {
     if (state === "PAUSED") el("resume").focus();
     lastState = state;
   }
-  el("position").textContent = String(k.finished ? k.finishPlace : position);
+  const place = String(k.finished ? k.finishPlace : position);
+  if (el("position").textContent !== place && !reducedMotion.matches)
+    el("position").animate([{ transform: "scale(1.18)", color: "#fff9e9" }, { transform: "scale(1)" }], { duration: 300, easing: "ease-out" });
+  el("position").textContent = place;
   el("place-label").textContent =
     position === 1
       ? "SUNSHINE LEADER"
@@ -259,6 +258,9 @@ function updateUI() {
     : "—";
   el("speed").textContent = String(Math.round(Math.abs(k.speed) * 3.6));
   el("boost-fill").style.width = `${clamp(k.charge, 0, 1) * 100}%`;
+  document.querySelector(".boost-track")!.setAttribute("aria-valuenow", String(Math.round(k.charge * 100)));
+  el("nitro-slots").setAttribute("aria-label", `${k.nitro} of 2 nitro charges ready`);
+  el("burst-fill").style.transform = `scaleX(${clamp(k.boostTime / 2.15, 0, 1)})`;
   el("boost-label").textContent =
     k.boostTime > 0
       ? "NITRO!"
@@ -268,7 +270,7 @@ function updateUI() {
           ? "NITRO STORAGE FULL"
           : "DRIFT TO CHARGE";
   el("drift-status").textContent = k.drift
-    ? `${Math.round((k.driftAngle * 180) / Math.PI)}° SLIP · ${k.driftDuration.toFixed(1)}s`
+    ? `${k.driftQuality > 0.7 ? "CLEAN SLIDE" : "BUILDING"} · ${k.driftDuration.toFixed(1)}s`
     : k.boostTime > 0
       ? `${k.boostTime.toFixed(1)}s BURST`
       : "BUILD YOUR BURST";
@@ -277,17 +279,32 @@ function updateUI() {
   document.querySelector(".boost-card")!.classList.toggle("drifting", k.drift);
   document
     .querySelectorAll(".nitro-slot")
-    .forEach((s, i) => s.classList.toggle("charged", i < k.nitro));
+    .forEach((s, i) => {
+      if (i < k.nitro && !s.classList.contains("charged") && !reducedMotion.matches)
+        s.animate([{ transform: "scale(1.5)", filter: "brightness(2)" }, { transform: "scale(1)", filter: "brightness(1)" }], { duration: 450, easing: "ease-out" });
+      s.classList.toggle("charged", i < k.nitro);
+    });
   document.body.classList.toggle(
     "boosting",
     k.boostTime > 0 && state === "RACING",
   );
-  el("countdown").textContent =
+  document.body.classList.toggle("mini-boost", k.miniTime > 0 && state === "RACING");
+  document.body.classList.toggle("race-paused", state === "PAUSED");
+  el("speed-lines").style.setProperty("--speed-effect", String(state === "RACING" ? clamp((k.speed - 26) / 22, 0, 0.28) + (k.boostTime > 0 ? 0.65 : 0) : 0));
+  document.querySelector<HTMLElement>(".speed-ticks")!.style.setProperty("--speed-percent", `${clamp(Math.abs(k.speed) / 44.5, 0, 1) * 100}%`);
+  const countdown =
     state === "COUNTDOWN"
       ? String(Math.ceil(game.countdown))
       : state === "RACING" && goTime > 0 && game.time < 1.1
         ? "GO!"
         : "";
+  if (countdown && el("countdown").textContent !== countdown && !reducedMotion.matches)
+    el("countdown").animate([
+      { transform: "translate(-50%, -50%) rotate(-5deg) scale(1.65)", opacity: 0 },
+      { transform: "translate(-50%, -50%) rotate(-5deg) scale(1)", opacity: 1, offset: 0.25 },
+      { transform: "translate(-50%, -50%) rotate(-5deg) scale(0.94)", opacity: 0.95 },
+    ], { duration: 700, easing: "ease-out" });
+  el("countdown").textContent = countdown;
   el("countdown").classList.toggle("go", goTime > 0);
   if (k.wrongWay > 1.5 && state === "RACING") {
     el("toast").textContent = "WRONG WAY · R TO RECOVER";
@@ -312,6 +329,7 @@ function frame(now: number) {
     if (event === "go") goTime = 1.05;
     if (event === "charged") toast("ϟ NITRO READY · PRESS CTRL");
     if (event === "boost") toast("ϟ NITRO — FULL SUNSHINE!");
+    if (event === "mini") toast("CLEAN EXIT! + MINI BOOST");
     if (event === "lap" && !game.karts[0].finished)
       toast(
         game.karts[0].laps === 2

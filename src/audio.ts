@@ -9,6 +9,10 @@ export class AudioEngine {
   engine2: OscillatorNode | null = null;
   engineGain: GainNode | null = null;
   skidGain: GainNode | null = null;
+  engineFilter: BiquadFilterNode | null = null;
+  boostGain: GainNode | null = null;
+  musicDuck: GainNode | null = null;
+  duckUntil = 0;
   analyser: AnalyserNode | null = null;
   musicAnalyser: AnalyserNode | null = null;
   engineAnalyser: AnalyserNode | null = null;
@@ -24,12 +28,21 @@ export class AudioEngine {
       const c = (this.ctx = new AudioContext());
       this.master = c.createGain();
       this.master.gain.value = this.muted ? 0 : 0.65;
-      this.master.connect(c.destination);
+      const limiter = c.createDynamicsCompressor();
+      limiter.threshold.value = -12;
+      limiter.knee.value = 18;
+      limiter.ratio.value = 4;
+      limiter.attack.value = 0.003;
+      limiter.release.value = 0.18;
+      this.master.connect(limiter);
+      limiter.connect(c.destination);
       this.analyser = c.createAnalyser();
-      this.master.connect(this.analyser);
+      limiter.connect(this.analyser);
       this.music = c.createGain();
       this.music.gain.value = this.musicEnabled ? 0.18 : 0;
-      this.music.connect(this.master);
+      this.musicDuck = c.createGain();
+      this.music.connect(this.musicDuck);
+      this.musicDuck.connect(this.master);
       this.musicAnalyser = c.createAnalyser();
       this.music.connect(this.musicAnalyser);
       this.sfx = c.createGain();
@@ -40,7 +53,7 @@ export class AudioEngine {
       for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
       this.engineGain = c.createGain();
       this.engineGain.gain.value = 0;
-      const filter = c.createBiquadFilter();
+      const filter = this.engineFilter = c.createBiquadFilter();
       filter.type = "lowpass";
       filter.frequency.value = 700;
       this.engine = c.createOscillator();
@@ -69,6 +82,15 @@ export class AudioEngine {
       skid.connect(band);
       band.connect(this.skidGain);
       this.skidGain.connect(this.sfx);
+      const rush = c.createBiquadFilter();
+      rush.type = "bandpass";
+      rush.frequency.value = 650;
+      rush.Q.value = 0.5;
+      this.boostGain = c.createGain();
+      this.boostGain.gain.value = 0;
+      skid.connect(rush);
+      rush.connect(this.boostGain);
+      this.boostGain.connect(this.sfx);
       skid.start();
       this.timer = window.setInterval(() => this.schedule(), 35);
     }
@@ -177,15 +199,19 @@ export class AudioEngine {
   cue(name: string) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
+    if (["3", "2", "1", "go", "boost", "finish"].includes(name))
+      this.duckUntil = t + (name === "finish" ? 1.4 : 0.65);
     if (["3", "2", "1"].includes(name)) this.tone(640, t, 0.2, 0.45, "sine");
     if (name === "go") {
-      this.tone(960, t, 0.42, 0.45, "square");
+      this.tone(960, t, 0.42, 0.4, "triangle");
       this.tone(1440, t + 0.05, 0.4, 0.15);
     }
     if (name === "boost") {
       this.hiss(t, 0.75, 0.4, 420);
       this.tone(160, t, 0.7, 0.25, "sawtooth", false, 920);
+      this.tone(70, t, 0.24, 0.3, "sine", false, 145);
     }
+    if (name === "mini") this.tone(380, t, 0.18, 0.12, "triangle", false, 760);
     if (name === "hit") {
       this.hiss(t, 0.12, 0.35, 300);
       this.tone(100, t, 0.14, 0.3, "triangle", false, 35);
@@ -202,19 +228,22 @@ export class AudioEngine {
   update(k: Kart, running: boolean) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    const rpm = 58 + Math.abs(k.speed) * 4.1 + (k.boostTime > 0 ? 40 : 0);
-    this.engine!.frequency.setTargetAtTime(rpm, t, 0.08);
-    this.engine2!.frequency.setTargetAtTime(rpm * 1.505, t, 0.08);
+    const rpm = 58 + Math.abs(k.speed) * 4.1 + clamp(k.longitudinalAcceleration, -15, 15) * 1.4 + (k.boostTime > 0 ? 40 : 0);
+    this.engine!.frequency.setTargetAtTime(rpm, t, 0.055);
+    this.engine2!.frequency.setTargetAtTime(rpm * 1.505, t, 0.055);
+    this.engineFilter!.frequency.setTargetAtTime(480 + Math.abs(k.speed) * 18, t, 0.08);
     this.engineGain!.gain.setTargetAtTime(
       running ? 0.027 + clamp(Math.abs(k.speed) / 32, 0, 1) * 0.027 : 0,
       t,
       0.1,
     );
     this.skidGain!.gain.setTargetAtTime(
-      running && k.drift ? clamp(k.driftAngle, 0.1, 0.7) * 0.2 : 0,
+      running && k.drift ? k.driftQuality * 0.13 : 0,
       t,
       0.07,
     );
+    this.boostGain!.gain.setTargetAtTime(running && k.boostTime > 0 ? 0.1 : 0, t, 0.08);
+    this.musicDuck!.gain.setTargetAtTime(t < this.duckUntil ? 0.42 : 1, t, 0.08);
   }
   setPaused(paused: boolean) {
     this.active = !paused;

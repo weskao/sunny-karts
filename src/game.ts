@@ -155,6 +155,9 @@ export class Kart {
   finishTime = 0;
   finishPlace = 0;
   drift = false;
+  driftState: "GRIP" | "DRIFT_ENTER" | "DRIFT" | "DRIFT_EXIT" = "GRIP";
+  driftQuality = 0;
+  longitudinalAcceleration = 0;
   driftSign = 0;
   driftDuration = 0;
   driftAngle = 0;
@@ -243,6 +246,9 @@ export class Game {
     k.s = k.lastS = p.s;
     k.speed = 0;
     k.drift = false;
+    k.driftState = "GRIP";
+    k.driftQuality = k.driftAngle = k.driftDuration = k.driftDistance = k.driftSpeed = 0;
+    k.longitudinalAcceleration = k.steer = 0;
     k.driftSign = 0;
     k.boostTime = 0;
     k.miniTime = 0;
@@ -310,13 +316,19 @@ export class Game {
       k.driftSign = Math.sign(input.steer);
       k.driftDuration = 0;
       k.driftDistance = 0;
+      k.driftState = "DRIFT_ENTER";
     }
-    if (!canDrift && k.drift && k.driftDuration > 0.65 && k.driftDistance > 12)
-      k.miniTime = 0.3;
+    if (!canDrift && k.drift) {
+      k.driftState = "DRIFT_EXIT";
+      if (k.driftDuration > 0.65 && k.driftDistance > 12 && k.driftQuality > 0.35) {
+        k.miniTime = 0.3;
+        if (k.id === 0) this.events.push("mini");
+      }
+    }
     k.drift = canDrift;
-    k.steer += (input.steer - k.steer) * (1 - Math.exp(-16 * DT));
+    k.steer += (input.steer - k.steer) * (1 - Math.exp(-(k.id === 0 ? 22 : 16) * DT));
     const boosting = k.boostTime > 0,
-      max = k.maxSpeed + (boosting ? 13 : 0);
+      max = k.maxSpeed + (boosting ? 13 : k.miniTime > 0 ? 2.5 : 0);
     let acceleration = input.throttle * k.acceleration * (boosting ? 1.75 : 1);
     if (input.brake)
       acceleration -= k.speed > 1 ? 25 * input.brake : 9 * input.brake;
@@ -325,34 +337,42 @@ export class Game {
     if (input.throttle === 0 && input.brake === 0)
       acceleration -= Math.sign(k.speed) * 1.2;
     if (k.drift) acceleration -= 1.2;
+    const previousSpeed = k.speed;
     k.speed = clamp(
       k.speed + acceleration * DT,
       -7,
       boosting ? max : Math.max(max, k.speed - 14 * DT),
     );
-    const turn = this.turnRate(k) * (k.drift ? 1.28 : 1) * Math.sign(k.speed);
-    k.yaw += k.steer * turn * DT;
+    k.longitudinalAcceleration = (k.speed - previousSpeed) / DT;
+    const turn = this.turnRate(k) * (k.drift ? 1.2 : 1) * Math.sign(k.speed);
+    const yawStep = k.steer * turn * DT;
+    k.yaw += yawStep;
     if (k.drift) {
-      // Explicit controlled slip: counter-steering reduces rotation and slip; release restores grip.
+      // Carry turn motion into the trajectory so steady yaw cannot accumulate extra slip.
+      // Opposite steering reduces the target slip without flipping its direction.
       const slipTarget =
-        k.driftSign * (0.27 + 0.22 * clamp(Math.abs(k.steer), 0, 1));
+        k.driftSign * (0.3 + 0.2 * clamp(k.steer * k.driftSign, -0.8, 1));
       const desired = k.yaw - slipTarget;
-      k.moveYaw += angle(desired - k.moveYaw) * (1 - Math.exp(-3.4 * DT));
+      k.moveYaw += yawStep;
+      k.moveYaw += angle(desired - k.moveYaw) * (1 - Math.exp(-9 * DT));
     } else k.moveYaw += angle(k.yaw - k.moveYaw) * (1 - Math.exp(-10 * DT));
     k.driftAngle = Math.abs(angle(k.yaw - k.moveYaw));
     k.driftSpeed = Math.max(0, k.speed);
+    k.driftQuality = 0;
     if (k.drift) {
       k.driftDuration += DT;
       k.driftDistance += k.speed * DT;
-      const quality =
-        clamp((k.speed - 9) / 17, 0, 1) * clamp(k.driftAngle / 0.5, 0, 1);
-      if (k.nitro < 2) k.charge += quality * DT * 0.3;
+      if (k.driftDuration >= 0.12) k.driftState = "DRIFT";
+      k.driftQuality =
+        clamp((k.driftSpeed - 10) / 16, 0, 1) * clamp(k.driftAngle / 0.42, 0, 1) *
+        clamp(k.driftDuration / 0.3, 0, 1) * clamp(k.driftDistance / 5, 0, 1);
+      if (k.nitro < 2) k.charge += k.driftQuality * DT * 0.36;
       if (k.charge >= 1) {
         k.nitro++;
         k.charge -= 1;
         if (k.id === 0) this.events.push("charged");
       }
-    }
+    } else if (k.driftAngle < 0.025) k.driftState = "GRIP";
     k.x += Math.sin(k.moveYaw) * k.speed * DT;
     k.z += Math.cos(k.moveYaw) * k.speed * DT;
     const p = this.track.nearest(k.x, k.z, k.s),

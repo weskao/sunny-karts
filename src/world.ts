@@ -9,8 +9,9 @@ function material(color: number, roughness = 0.75) {
   return materials.get(key)!;
 }
 const box = new T.BoxGeometry(1, 1, 1),
-  sphere = new T.SphereGeometry(1, 12, 8),
-  cylinder = new T.CylinderGeometry(1, 1, 1, 12);
+  sphere = new T.SphereGeometry(1, 20, 12),
+  cylinder = new T.CylinderGeometry(1, 1, 1, 12),
+  roofGeometry = new T.ConeGeometry(1, 1, 4);
 function mesh(
   parent: T.Object3D,
   geo: T.BufferGeometry,
@@ -60,9 +61,15 @@ export class World {
   wheels: T.Group[][] = [];
   tires: T.Group[][] = [];
   flames: T.Mesh[][] = [];
-  sun = new T.DirectionalLight(0xfff4d9, 3.0);
+  steeringWheels: T.Mesh[] = [];
+  startLights: T.Mesh[] = [];
+  windmill = new T.Group();
+  sun = new T.DirectionalLight(0xffdfb0, 3.1);
   target = new T.Vector3();
   camPos = new T.Vector3();
+  desired = new T.Vector3();
+  look = new T.Vector3();
+  boostBlend = 0;
   clock = 0;
   quality = true;
   particleCount = 320;
@@ -71,6 +78,12 @@ export class World {
   colors = new Float32Array(320 * 3);
   life = new Float32Array(320);
   vel = new Float32Array(320 * 3);
+  sizes = new Float32Array(320);
+  opacity = new Float32Array(320);
+  maxLife = new Float32Array(320);
+  effectTimers = new Float32Array(6);
+  lastHits = new Float32Array(6);
+  celebrated = false;
   particles: T.Points;
   skids: T.InstancedMesh;
   skidIndex = 0;
@@ -85,13 +98,27 @@ export class World {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
     this.renderer.outputColorSpace = T.SRGBColorSpace;
     this.renderer.toneMapping = T.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = T.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
-    this.scene.background = new T.Color(0xb9e5f1);
-    this.scene.fog = new T.Fog(0xb9e5f1, 160, 850);
-    this.scene.add(new T.HemisphereLight(0xe1f6ff, 0x648d59, 2.2));
+    this.scene.background = new T.Color(0xbadfe5);
+    this.scene.fog = new T.Fog(0xbadfe5, 210, 850);
+    this.scene.add(new T.HemisphereLight(0xc6e8ff, 0x708763, 1.65));
+    const sky = new T.Mesh(new T.SphereGeometry(1100, 24, 16), new T.ShaderMaterial({
+      side: T.BackSide, depthWrite: false,
+      uniforms: { horizon: { value: new T.Color(0xbadfe5) }, zenith: { value: new T.Color(0x69bcea) } },
+      vertexShader: `varying float elevation; void main() { elevation = normalize(position).y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `
+        uniform vec3 horizon;
+        uniform vec3 zenith;
+        varying float elevation;
+        void main() {
+          gl_FragColor = vec4(mix(horizon, zenith, smoothstep(0.0, 0.65, elevation)), 1.0);
+          #include <colorspace_fragment>
+        }`,
+    }));
+    this.scene.add(sky);
     this.sun.position.set(-65, 110, 40);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -105,25 +132,42 @@ export class World {
     this.scene.add(this.sun, this.sun.target);
     this.buildTrack();
     this.scenery();
+    this.landmarks();
+    this.batchScenery();
     for (const k of game.karts) this.buildKart(k);
     const geo = new T.BufferGeometry();
     geo.setAttribute("position", new T.BufferAttribute(this.positions, 3));
     geo.setAttribute("color", new T.BufferAttribute(this.colors, 3));
-    const c = document.createElement("canvas");
-    c.width = c.height = 32;
-    const ctx = c.getContext("2d")!;
-    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, "rgba(255,255,255,.8)");
-    grad.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 32, 32);
+    geo.setAttribute("size", new T.BufferAttribute(this.sizes, 1));
+    geo.setAttribute("opacity", new T.BufferAttribute(this.opacity, 1));
     this.positions.fill(-1000);
     this.particles = new T.Points(
       geo,
-      new T.PointsMaterial({
-        size: 1.1,
-        map: new T.CanvasTexture(c),
-        vertexColors: true,
+      new T.ShaderMaterial({
+        uniforms: { height: { value: innerHeight * this.renderer.getPixelRatio() } },
+        vertexShader: `
+          attribute vec3 color;
+          attribute float size;
+          attribute float opacity;
+          uniform float height;
+          varying vec3 tint;
+          varying float fade;
+          void main() {
+            vec4 p = modelViewMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * p;
+            gl_PointSize = clamp(size * height / max(1.0, -p.z), 1.0, 96.0);
+            tint = color; fade = opacity;
+          }`,
+        fragmentShader: `
+          varying vec3 tint;
+          varying float fade;
+          void main() {
+            float d = length(gl_PointCoord - 0.5) * 2.0;
+            if (d > 1.0) discard;
+            gl_FragColor = vec4(tint, (1.0 - smoothstep(0.05, 1.0, d)) * fade);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+          }`,
         transparent: true,
         depthWrite: false,
       }),
@@ -148,6 +192,25 @@ export class World {
     this.dummy.scale.set(1, 1, 1);
     this.resize();
     this.snapCamera();
+  }
+  surface(color: number, grass = false) {
+    const c = document.createElement("canvas");
+    c.width = c.height = 128;
+    const ctx = c.getContext("2d")!, data = ctx.createImageData(128, 128);
+    let seed = 19;
+    for (let i = 0; i < data.data.length; i += 4) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const shade = 210 + (seed % 42);
+      data.data[i] = data.data[i + 1] = data.data[i + 2] = shade;
+      data.data[i + 3] = 255;
+    }
+    ctx.putImageData(data, 0, 0);
+    const texture = new T.CanvasTexture(c);
+    texture.wrapS = texture.wrapT = T.RepeatWrapping;
+    texture.colorSpace = T.SRGBColorSpace;
+    texture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    if (grass) texture.repeat.set(350, 350);
+    return new T.MeshStandardMaterial({ color, map: texture, roughness: 0.95 });
   }
   strip(
     inner: number,
@@ -183,9 +246,14 @@ export class World {
     g.setAttribute("color", new T.Float32BufferAttribute(colors, 3));
     g.setIndex(indices);
     g.computeVertexNormals();
+    if (color === 0x526c78) {
+      const uv: number[] = [];
+      for (let i = 0; i < vertices.length; i += 3) uv.push(vertices[i] / 9, vertices[i + 2] / 9);
+      g.setAttribute("uv", new T.Float32BufferAttribute(uv, 2));
+    }
     const m = new T.Mesh(
       g,
-      new T.MeshStandardMaterial({
+      color === 0x526c78 ? this.surface(0x465663) : new T.MeshStandardMaterial({
         vertexColors: true,
         roughness: 1,
         side: T.DoubleSide,
@@ -195,7 +263,8 @@ export class World {
     this.scene.add(m);
   }
   buildTrack() {
-    mesh(this.scene, box, 0x8abc72, [150, -0.55, 0], [2200, 1, 2200]);
+    const ground = mesh(this.scene, box, 0x8abc72, [150, -0.55, 0], [2200, 1, 2200]);
+    ground.material = this.surface(0x88b966, true);
     const w = this.game.track.width / 2;
     this.strip(-w - 1.3, w + 1.3, 0xd8c995, 0.002);
     this.strip(-w, w, 0x526c78, 0.025);
@@ -272,6 +341,15 @@ export class World {
     back.position.z = 0.54;
     back.rotation.y = 0;
     start.add(back);
+    mesh(start, box, 0x244958, [0, 5.92, 0], [5.5, 0.85, 0.65]);
+    for (let i = 0; i < 3; i++) {
+      const light = new T.Mesh(sphere, new T.MeshBasicMaterial({ color: 0x546269 }));
+      light.position.set((i - 1) * 1.5, 5.95, -0.4);
+      light.scale.set(0.3, 0.3, 0.12);
+      light.userData.animated = true;
+      start.add(light);
+      this.startLights.push(light);
+    }
     for (let i = 0; i < 6; i++) {
       const q = this.game.track.at(
         this.game.track.length - 14 - Math.floor(i / 2) * 6,
@@ -351,6 +429,7 @@ export class World {
       leaves.setColorAt(i, colors[i]);
     });
     this.scene.add(ti, leaves);
+    leaves.castShadow = true;
     for (let i = 0; i < 35; i++) {
       const p = this.game.track.at((i / 35) * this.game.track.length + 30),
         side = i % 2 ? 1 : -1,
@@ -365,15 +444,16 @@ export class World {
       const h = 4 + (i % 3) * 1.1,
         w = 6 + (i % 3),
         palette = [0xffe8b5, 0xf7c3ac, 0xc0e6d5, 0xf3d2de, 0xbad8e7];
-      mesh(g, box, palette[i % 5], [0, h / 2, 0], [w, h, 6]);
+      mesh(g, box, palette[i % 5], [0, h / 2, 0], [w, h, 6], true);
       const roof = mesh(
         g,
-        new T.ConeGeometry(1, 1, 4),
+        roofGeometry,
         [0xef8877, 0x508b9b, 0xeac17c][i % 3],
         [0, h + 1.5, 0],
         [w * 0.85, 3, 5.1],
       );
       roof.rotation.y = Math.PI / 4;
+      roof.castShadow = true;
       mesh(g, box, 0x5e8e9a, [0, 1.25, 3.02], [1.3, 2.5, 0.08]);
       for (const a of [-1, 1]) {
         mesh(g, box, 0xfff7df, [a * w * 0.3, h * 0.62, 3.04], [1.5, 1.65, 0.1]);
@@ -396,7 +476,7 @@ export class World {
         new T.IcosahedronGeometry(1, 2),
         [0x95bd92, 0x93bb9a, 0xa3cbb2][i % 3],
         [160 + Math.cos(a) * r, 5, Math.sin(a) * r],
-        [80 + rand() * 80, 40 + rand() * 110, 85 + rand() * 80],
+        [100 + rand() * 80, 35 + rand() * 65, 100 + rand() * 80],
       );
     }
     for (let i = 0; i < 24; i++) {
@@ -439,6 +519,107 @@ export class World {
       }
     }
   }
+  landmarks() {
+    const palette = [0xffc641, 0xf58392, 0x64c6c3, 0xa597e5];
+    const place = (s: number, offset = 0) => {
+      const p = this.game.track.at(s), g = new T.Group();
+      g.position.set(p.x + p.nx * offset, 0, p.z + p.nz * offset);
+      g.rotation.y = p.yaw;
+      this.scene.add(g);
+      return g;
+    };
+    // Trackside lamps and pennants give a regular, readable sense of speed.
+    for (let s = 22; s < this.game.track.length; s += 45) {
+      const g = place(s, (Math.floor(s / 45) % 2 ? 1 : -1) * 12);
+      mesh(g, cylinder, 0x31566a, [0, 2.8, 0], [0.13, 5.6, 0.13]);
+      mesh(g, box, 0xffe3a4, [0, 5.5, 0], [0.7, 0.3, 0.7]);
+      mesh(g, box, palette[Math.floor(s / 45) % 4], [0.6, 4.1, 0], [1.1, 1.8, 0.08]);
+      mesh(g, box, 0xfff6df, [0.6, 4.1, -0.05], [0.13, 1.1, 0.02]);
+    }
+    for (const side of [-1, 1]) {
+      const stand = place(20, side * 21);
+      stand.rotation.y += side * Math.PI / 2;
+      for (let row = 0; row < 3; row++) {
+        mesh(stand, box, 0x58959b, [0, 0.45 + row * 0.65, -row * 1.3], [15, 0.7, 1.5]);
+        for (let i = 0; i < 12; i++) {
+          const x = -6.6 + i * 1.2, y = 1.2 + row * 0.65;
+          mesh(stand, sphere, palette[(i + row) % 4], [x, y, -row * 1.3], [0.35, 0.5, 0.3]);
+          mesh(stand, sphere, 0xffedce, [x, y + 0.55, -row * 1.3], [0.28, 0.28, 0.28]);
+        }
+      }
+      for (const x of [-8, 8]) mesh(stand, cylinder, 0xffda83, [x, 3.5, -1], [0.15, 7, 0.15]);
+      mesh(stand, box, 0xf58392, [0, 6.5, -1], [17, 0.3, 5]);
+    }
+    const mill = place(375, -29);
+    mesh(mill, cylinder, 0xffe6bd, [0, 6, 0], [3.4, 12, 3.4]);
+    mesh(mill, roofGeometry, 0xed8678, [0, 14, 0], [5.1, 5, 5.1]);
+    this.windmill.position.set(0, 11, -3.6);
+    mill.add(this.windmill);
+    for (let i = 0; i < 4; i++) {
+      const blade = new T.Group();
+      blade.rotation.z = i * Math.PI / 2 + 0.35;
+      this.windmill.add(blade);
+      const arm = mesh(blade, box, 0x476b76, [0, 4, 0], [0.25, 8, 0.25]);
+      const sail = mesh(blade, box, 0xfff4d9, [0.6, 5.5, -0.12], [1.5, 4.5, 0.12]);
+      arm.userData.animated = sail.userData.animated = true;
+    }
+    const hub = mesh(this.windmill, sphere, 0xffc641, [0, 0, -0.3], [0.65, 0.65, 0.5]);
+    hub.userData.animated = true;
+    // A market district on the fast section, kept outside both road edges.
+    for (let i = 0; i < 7; i++) {
+      const market = place(840 + i * 9, -16);
+      market.rotation.y += Math.PI / 2;
+      mesh(market, box, 0xffefcf, [0, 1.1, 0], [6, 2.2, 3]);
+      mesh(market, box, palette[i % 4], [0, 3.7, 0], [6.8, 0.4, 4]);
+      for (let j = 0; j < 7; j++) {
+        mesh(market, box, j % 2 ? 0xfff5dd : palette[i % 4], [-3 + j, 3.2, 1.9], [0.95, 0.8, 0.12]);
+        mesh(market, sphere, [0xffa54e, 0xff6f78, 0xa8cf62][j % 3], [-2.3 + j * 0.75, 2.3, 0.7], [0.35, 0.35, 0.35]);
+      }
+      for (const x of [-2.8, 2.8]) mesh(market, cylinder, 0x506b68, [x, 2.1, 1.4], [0.1, 4.2, 0.1]);
+    }
+    for (let i = 0; i < 5; i++) {
+      const balloon = place(1290 + i * 29, (i % 2 ? 1 : -1) * (27 + i * 5));
+      const h = 20 + i * 6;
+      mesh(balloon, sphere, palette[i % 4], [0, h, 0], [5, 6.5, 5]);
+      mesh(balloon, sphere, 0xfff2cb, [0, h, -0.5], [1.5, 6.55, 4.9]);
+      mesh(balloon, box, 0xb78754, [0, h - 9, 0], [2.4, 1.6, 2.4]);
+      for (const side of [-1, 1]) mesh(balloon, cylinder, 0x8b7664, [side, h - 7, 0], [0.055, 3, 0.055]);
+    }
+    for (const [s, title, color] of [
+      [335, "SUNFLOWER BEND", "#ffd66b"],
+      [815, "VILLAGE MARKET", "#ff9bad"],
+      [1265, "SKY PARADE", "#94e4df"],
+    ] as const) {
+      const g = place(s, -13.5);
+      mesh(g, cylinder, 0x446b77, [0, 2.8, 0], [0.15, 5.6, 0.15]);
+      const board = new T.Mesh(new T.PlaneGeometry(7, 1.6), label(title, color, "#214c58"));
+      board.position.y = 4.9;
+      board.rotation.y = Math.PI;
+      g.add(board);
+    }
+  }
+  batchScenery() {
+    // Batch only immutable props; 100m cells retain useful frustum culling.
+    const groups = new Map<string, T.Mesh[]>();
+    this.scene.updateMatrixWorld(true);
+    this.scene.traverse((o) => {
+      if (!(o instanceof T.Mesh) || o instanceof T.InstancedMesh || o.userData.animated || Array.isArray(o.material)) return;
+      const p = this.desired.setFromMatrixPosition(o.matrixWorld);
+      const key = `${o.geometry.uuid}/${o.material.uuid}/${o.castShadow}/${o.receiveShadow}/${Math.floor(p.x / 100)}/${Math.floor(p.z / 100)}`;
+      const items = groups.get(key) ?? [];
+      items.push(o); groups.set(key, items);
+    });
+    for (const items of groups.values()) {
+      if (items.length < 3) continue;
+      const first = items[0], batch = new T.InstancedMesh(first.geometry, first.material, items.length);
+      batch.name = "static-prop-batch";
+      batch.castShadow = first.castShadow;
+      batch.receiveShadow = first.receiveShadow;
+      items.forEach((o, i) => { batch.setMatrixAt(i, o.matrixWorld); o.removeFromParent(); });
+      batch.computeBoundingSphere();
+      this.scene.add(batch);
+    }
+  }
   buildKart(k: Kart) {
     const root = new T.Group(),
       body = new T.Group();
@@ -446,12 +627,21 @@ export class World {
     this.scene.add(root);
     this.roots.push(root);
     this.bodies.push(body);
+    const paint = new T.MeshPhysicalMaterial({ color: k.color, roughness: 0.28, metalness: 0.12, clearcoat: 1, clearcoatRoughness: 0.2 });
     mesh(body, box, 0x263c49, [0, 0.5, 0], [1.65, 0.27, 2.4], true);
     mesh(body, sphere, k.color, [0, 0.82, 0.16], [0.99, 0.43, 1.36], true);
     mesh(body, sphere, k.color, [0, 0.95, 1.02], [0.87, 0.32, 0.63], true);
     mesh(body, box, 0xfff5d8, [0, 1.21, 0.99], [0.24, 0.06, 0.95]);
     mesh(body, box, 0x344d5a, [0, 0.55, 1.5], [1.95, 0.3, 0.32], true);
     mesh(body, box, 0x344d5a, [0, 0.55, -1.35], [1.9, 0.28, 0.3], true);
+    for (const side of [-1, 1]) {
+      mesh(body, sphere, k.color, [side * 0.78, 0.75, -0.2], [0.32, 0.3, 0.95], true);
+      mesh(body, box, 0xfff4d5, [side * 0.91, 0.8, -0.15], [0.04, 0.13, 0.85]);
+      mesh(body, cylinder, 0x3b5361, [side * 0.7, 1.1, -1.15], [0.08, 0.65, 0.08]);
+      mesh(body, box, 0xff6272, [side * 0.67, 0.88, -1.48], [0.3, 0.14, 0.08]);
+    }
+    mesh(body, box, k.color, [0, 1.42, -1.14], [1.95, 0.12, 0.45], true);
+    mesh(body, box, 0xfff4d5, [0, 1.49, -1.14], [0.25, 0.025, 0.44]);
     for (const side of [-1, 1])
       mesh(
         body,
@@ -475,11 +665,13 @@ export class World {
         const roll = new T.Group();
         mount.add(roll);
         tires.push(roll);
-        const tire = new T.Mesh(wheelGeo, material(0x293947));
+        const tire = new T.Mesh(wheelGeo, material(0x172733, 0.92));
         tire.rotation.z = Math.PI / 2;
         tire.castShadow = true;
         roll.add(tire);
-        const rim = new T.Mesh(rimGeo, material(0xfff3dd, 0.4));
+        const rimMaterial = material(0xcbd9df, 0.28);
+        rimMaterial.metalness = 0.55;
+        const rim = new T.Mesh(rimGeo, rimMaterial);
         rim.rotation.z = Math.PI / 2;
         roll.add(rim);
         mesh(roll, box, k.color, [side * 0.205, 0, 0], [0.02, 0.34, 0.08]);
@@ -494,6 +686,7 @@ export class World {
       [1, 1, 1],
     );
     steering.rotation.x = -0.5;
+    this.steeringWheels.push(steering);
     // Original marshmallow pilot: round helmet, dark visor, tiny scarf.
     mesh(body, sphere, 0xf3f0df, [0, 1.5, -0.23], [0.43, 0.52, 0.33], true);
     for (const side of [-1, 1]) {
@@ -540,6 +733,10 @@ export class World {
       flames.push(flame);
     }
     this.flames.push(flames);
+    body.traverse((o) => {
+      if (o instanceof T.Mesh && o.material instanceof T.MeshStandardMaterial && o.material.color.getHex() === k.color)
+        o.material = paint;
+    });
     if (k.id > 0) {
       const c = document.createElement("canvas");
       c.width = 256;
@@ -563,24 +760,34 @@ export class World {
       root.add(sprite);
     }
   }
-  emit(x: number, y: number, z: number, boost: boolean) {
+  emit(x: number, y: number, z: number, kind: "smoke" | "boost" | "dust" | "spark" | "confetti") {
     const i = this.particleIndex++ % this.particleCount;
-    this.life[i] = boost ? 0.35 : 0.8;
+    const boost = kind === "boost", spark = kind === "spark", confetti = kind === "confetti";
+    this.life[i] = this.maxLife[i] = boost ? 0.3 : spark ? 0.24 : confetti ? 2.2 : 0.85;
+    this.sizes[i] = boost ? 0.22 : spark || confetti ? 0.075 : 0.38;
+    this.opacity[i] = 0.7;
     this.positions[i * 3] = x;
     this.positions[i * 3 + 1] = y;
     this.positions[i * 3 + 2] = z;
-    this.vel[i * 3] = (Math.random() - 0.5) * 2;
-    this.vel[i * 3 + 1] = boost ? 0.5 : 1.4;
-    this.vel[i * 3 + 2] = (Math.random() - 0.5) * 2;
-    const c = new T.Color(boost ? 0x64eaff : 0xe9e7d8);
+    this.vel[i * 3] = (Math.random() - 0.5) * (spark || confetti ? 12 : 2);
+    this.vel[i * 3 + 1] = confetti ? 7 + Math.random() * 5 : spark ? 3 : boost ? 0.2 : 1.1;
+    this.vel[i * 3 + 2] = (Math.random() - 0.5) * (spark || confetti ? 12 : 2);
+    const c = new T.Color(boost ? 0x66eaff : spark ? 0xffc85b : confetti ? [0xffc641, 0xff7793, 0x74eeed][i % 3] : kind === "dust" ? 0xd9bd8a : 0xf4f4f0);
     this.colors[i * 3] = c.r;
     this.colors[i * 3 + 1] = c.g;
     this.colors[i * 3 + 2] = c.b;
   }
   clearEffects() {
     this.life.fill(0);
+    this.opacity.fill(0);
     this.positions.fill(-1000);
+    this.particleIndex = 0;
+    this.effectTimers.fill(0);
+    this.lastHits.fill(0);
+    this.celebrated = false;
+    this.boostBlend = 0;
     this.skidIndex = 0;
+    this.skidTimer = 0;
     this.dummy.scale.set(0, 0, 0);
     this.dummy.updateMatrix();
     for (let i = 0; i < 320; i++) this.skids.setMatrixAt(i, this.dummy.matrix);
@@ -589,15 +796,21 @@ export class World {
   }
   snapCamera() {
     const k = this.game.karts[0];
-    this.camPos.set(k.x - Math.sin(k.yaw) * 9, 5.5, k.z - Math.cos(k.yaw) * 9);
+    this.camPos.set(k.x - Math.sin(k.yaw) * 8.5, 4.3, k.z - Math.cos(k.yaw) * 8.5);
     this.camera.position.copy(this.camPos);
-    this.target.set(k.x, 1.2, k.z);
+    this.target.set(k.x + Math.sin(k.yaw) * 5, 1.2, k.z + Math.cos(k.yaw) * 5);
+    this.boostBlend = 0;
   }
   update(dt: number, alpha: number) {
     this.clock += dt;
     this.skidTimer += dt;
     const active =
       this.game.state === "RACING" || this.game.state === "FINISHED";
+    this.windmill.rotation.z += dt * 0.24;
+    this.startLights.forEach((light, i) => {
+      const on = this.game.state === "COUNTDOWN" && this.game.countdown <= 3 - i;
+      (light.material as T.MeshBasicMaterial).color.setHex(active ? 0x89ffc2 : on ? 0xff7468 : 0x546269);
+    });
     for (const k of this.game.karts) {
       const root = this.roots[k.id];
       root.position.set(
@@ -609,6 +822,9 @@ export class World {
       this.bodies[k.id].rotation.z +=
         (k.steer * (k.drift ? -0.12 : -0.06) - this.bodies[k.id].rotation.z) *
         Math.min(1, dt * 12);
+      this.bodies[k.id].rotation.x +=
+        (clamp(k.longitudinalAcceleration * 0.003, -0.065, 0.05) - this.bodies[k.id].rotation.x) * (1 - Math.exp(-dt * 10));
+      this.steeringWheels[k.id].rotation.z = -k.steer * 0.5;
       this.bodies[k.id].position.y = active
         ? Math.sin(this.clock * 20 + k.id) * 0.014 * Math.min(1, k.speed / 10)
         : 0;
@@ -620,11 +836,17 @@ export class World {
         f.visible = k.boostTime > 0 && active;
         f.scale.y = 1 + Math.sin(this.clock * 47) * 0.2;
       });
-      if (active && (k.drift || k.boostTime > 0))
+      const dust = Math.abs(k.lateral) > this.game.track.width / 2 - 1.4 && k.speed > 8;
+      const emitting = active && (k.drift || k.boostTime > 0 || dust);
+      if (emitting) this.effectTimers[k.id] += dt * (k.boostTime > 0 ? 70 : 16 + 42 * k.driftQuality);
+      else this.effectTimers[k.id] = 0;
+      const bursts = dt > 0 ? Math.floor(this.effectTimers[k.id] + 0.00001) : 0;
+      this.effectTimers[k.id] -= bursts;
+      if (emitting && dt > 0)
         for (const side of [-1, 1]) {
           const x = k.x - Math.sin(k.yaw) * 1.15 + Math.cos(k.yaw) * side * 0.8,
             z = k.z - Math.cos(k.yaw) * 1.15 - Math.sin(k.yaw) * side * 0.8;
-          this.emit(x, 0.45, z, k.boostTime > 0);
+          for (let n = 0; n < bursts; n++) this.emit(x, 0.45, z, k.boostTime > 0 ? "boost" : dust ? "dust" : "smoke");
           if (k.drift && this.skidTimer > 0.055) {
             this.dummy.position.set(x, 0.06, z);
             this.dummy.rotation.set(-Math.PI / 2, 0, -k.moveYaw);
@@ -634,11 +856,22 @@ export class World {
             this.skids.instanceMatrix.needsUpdate = true;
           }
         }
+      if (active && dt > 0 && k.hit > this.lastHits[k.id] + 0.1)
+        for (let n = 0; n < 12; n++) this.emit(k.x + Math.sin(k.yaw), 0.5, k.z + Math.cos(k.yaw), "spark");
+      this.lastHits[k.id] = k.hit;
+    }
+    if (this.game.state === "FINISHED" && !this.celebrated && dt > 0) {
+      this.celebrated = true;
+      const k = this.game.karts[0];
+      for (let i = 0; i < 100; i++) this.emit(k.x + (i % 2 ? 4 : -4), 2, k.z, "confetti");
     }
     if (this.skidTimer > 0.055) this.skidTimer = 0;
     for (let i = 0; i < this.particleCount; i++) {
       if (this.life[i] > 0) {
         this.life[i] -= dt;
+        this.opacity[i] = Math.max(0, this.life[i] / this.maxLife[i]) * 0.7;
+        this.sizes[i] += dt * (this.maxLife[i] > 0.7 && this.maxLife[i] < 1 ? 0.6 : 0.08);
+        if (this.maxLife[i] > 1 || this.maxLife[i] < 0.3) this.vel[i * 3 + 1] -= dt * 9;
         for (let j = 0; j < 3; j++)
           this.positions[i * 3 + j] += this.vel[i * 3 + j] * dt;
         if (this.life[i] <= 0) this.positions[i * 3 + 1] = -1000;
@@ -646,30 +879,34 @@ export class World {
     }
     this.particles.geometry.attributes.position.needsUpdate = true;
     this.particles.geometry.attributes.color.needsUpdate = true;
+    this.particles.geometry.attributes.size.needsUpdate = true;
+    this.particles.geometry.attributes.opacity.needsUpdate = true;
     const k = this.game.karts[0],
       ready = this.game.state === "READY";
-    const followYaw = k.moveYaw + angle(k.yaw - k.moveYaw) * 0.3;
-    const back = ready ? 19 : 8.2 + clamp(k.speed / 40, 0, 1) * 1.2,
-      height = ready ? 10.5 : 4.6;
-    const desired = new T.Vector3(
-      k.x - Math.sin(followYaw) * back + (ready ? -11 : 0),
+    this.boostBlend += ((k.boostTime > 0 ? 1 : 0) - this.boostBlend) * (1 - Math.exp(-dt * 5));
+    const root = this.roots[0], x = root.position.x, z = root.position.z;
+    const followYaw = root.rotation.y - angle(k.yaw - k.moveYaw) * 0.55;
+    const back = ready ? 19 : 8.1 + clamp(k.speed / 40, 0, 1) * 0.8 + this.boostBlend * 1.25,
+      height = ready ? 10.5 : 4.2;
+    this.desired.set(
+      x - Math.sin(followYaw) * back + (ready ? -11 : Math.cos(followYaw) * k.steer * 0.3),
       height,
-      k.z - Math.cos(followYaw) * back,
+      z - Math.cos(followYaw) * back,
     );
-    this.camPos.lerp(desired, 1 - Math.exp(-dt * (ready ? 3 : 9)));
+    this.camPos.lerp(this.desired, 1 - Math.exp(-dt * (ready ? 3 : 14)));
     this.camera.position.copy(this.camPos);
-    const look = new T.Vector3(
-      k.x + Math.sin(k.yaw) * 5,
+    this.look.set(
+      x + Math.sin(root.rotation.y + k.steer * 0.09) * 5,
       1.25,
-      k.z + Math.cos(k.yaw) * 5,
+      z + Math.cos(root.rotation.y + k.steer * 0.09) * 5,
     );
-    this.target.lerp(look, 1 - Math.exp(-dt * 12));
+    this.target.lerp(this.look, 1 - Math.exp(-dt * 18));
     this.camera.lookAt(this.target);
     if (k.hit > 0 && active)
       this.camera.position.x += Math.sin(this.clock * 65) * k.hit * 0.045;
     const fov = ready
       ? 56
-      : 64 + clamp(k.speed / 32, 0, 1) * 7 + (k.boostTime > 0 ? 8 : 0);
+      : 64 + clamp(k.speed / 32, 0, 1) * 7 + this.boostBlend * 8;
     this.camera.fov += (fov - this.camera.fov) * (1 - Math.exp(-dt * 5));
     this.camera.updateProjectionMatrix();
     this.sun.position.set(k.x - 65, 110, k.z + 40);
@@ -681,6 +918,7 @@ export class World {
     this.renderer.setSize(innerWidth, innerHeight);
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
+    (this.particles.material as T.ShaderMaterial).uniforms.height.value = innerHeight * this.renderer.getPixelRatio();
   }
   toggleQuality() {
     this.quality = !this.quality;
