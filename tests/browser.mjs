@@ -80,6 +80,7 @@ try {
   assert.ok(report.acceleration > 15);
   report.audio = await page.evaluate(async () => {
     const a = window.__sunny.audio;
+    const t0 = a.ctx.currentTime;
     let music = 0,
       engine = 0;
     for (let i = 0; i < 12; i++) {
@@ -97,11 +98,16 @@ try {
       );
       await new Promise((r) => setTimeout(r, 30));
     }
-    return { state: a.ctx.state, musicRMS: music, engineRMS: engine };
+    return {
+      state: a.ctx.state,
+      musicRMS: music,
+      engineRMS: engine,
+      clockAdvance: a.ctx.currentTime - t0,
+    };
   });
   assert.equal(report.audio.state, "running");
-  assert.ok(report.audio.musicRMS > 0.001);
-  assert.ok(report.audio.engineRMS > 0.001);
+  assert.ok(report.audio.musicRMS > 0.001, JSON.stringify(report.audio));
+  assert.ok(report.audio.engineRMS > 0.001, JSON.stringify(report.audio));
   await page.keyboard.down("ArrowDown");
   await page.waitForTimeout(650);
   await page.keyboard.up("ArrowDown");
