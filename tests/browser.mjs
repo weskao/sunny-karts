@@ -47,9 +47,23 @@ try {
   await page.click("#music");
   await page.click("#sound");
   await page.keyboard.down("ArrowUp");
-  await page.waitForTimeout(800);
+  // Sample each frame while still in COUNTDOWN: slow CI renderers can end the 3 s countdown early.
   assert.equal(
-    await page.evaluate(() => window.__sunny.game.karts[0].speed),
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const t0 = performance.now();
+          let moved = 0;
+          const tick = () => {
+            const g = window.__sunny.game;
+            if (g.state !== "COUNTDOWN" || performance.now() - t0 > 800)
+              return resolve(moved);
+            moved ||= g.karts[0].speed;
+            requestAnimationFrame(tick);
+          };
+          tick();
+        }),
+    ),
     0,
   );
   await page.screenshot({ path: "artifacts/02-countdown.png" });
