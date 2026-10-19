@@ -14,7 +14,8 @@ const browser = await chromium.launch({
   args: ["--enable-webgl", "--ignore-gpu-blocklist"],
 });
 const page = await browser.newPage({
-  viewport: { width: 1440, height: 900 },
+  // CI renders WebGL in software; a smaller canvas keeps the sim near real time.
+  viewport: process.env.CI ? { width: 960, height: 600 } : { width: 1440, height: 900 },
   deviceScaleFactor: 1,
 });
 const errors = [];
@@ -30,6 +31,9 @@ try {
   await page.waitForFunction(
     () => window.__sunny?.world.renderer.info.render.calls > 0,
   );
+  // Drop shadows on CI without changing world.quality, which the #quality checks below read.
+  if (process.env.CI)
+    await page.evaluate(() => (window.__sunny.world.renderer.shadowMap.enabled = false));
   await page.screenshot({ path: "artifacts/01-ready.png" });
   assert.equal(await page.locator("#ready").isVisible(), true);
   await page.click("#music");
