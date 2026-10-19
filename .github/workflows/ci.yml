@@ -1,0 +1,91 @@
+# Check every push / PR; publish to GitHub Pages on every push to the default branch, version tags and manual runs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled; push, tag and manual runs always finish.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ">=22.18"
+          cache: npm
+      - id: pages
+        uses: actions/configure-pages@v6
+      - run: npm ci
+      # base_path is "/<repo>" for project pages and "" for user pages or a custom domain.
+      - run: npm run build -- --base=${{ steps.pages.outputs.base_path }}/
+      # The deploy job publishes exactly this artifact.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ">=22.18"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      # window.__sunny (the test hook) exists only in dev builds.
+      - name: Browser test against the dev server
+        env:
+          GAME_URL: http://127.0.0.1:5174/
+        run: |
+          npm run dev -- --port 5174 &
+          curl --silent --fail --retry 20 --retry-delay 1 --retry-connrefused -o /dev/null "$GAME_URL"
+          npm run test:browser
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-failures
+          path: artifacts
+
+  deploy:
+    if: github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v5
+        id: deployment
+      - name: Verify public website
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          SMOKE_TEXT: "Sunny Karts"
+        run: |
+          curl --fail --silent --show-error --retry 6 --retry-delay 10 --retry-all-errors -o page.html "$PAGE_URL"
+          grep -qF -- "$SMOKE_TEXT" page.html

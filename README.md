@@ -2,6 +2,8 @@
 
 A complete, original 3D browser kart race around **Sunbeam Village**. Six colorful racers, a 1.72 km circuit, three laps, controlled drifting, and earned nitro. Built with Vite, TypeScript, Three.js, and the Web Audio API. No engine installation, backend, account, or remote assets.
 
+**Play online:** https://weskao.github.io/sunny-karts/ (redeployed by GitHub Actions on every push to `main` once build, unit and browser tests pass).
+
 ## Play locally
 
 Node.js 22.18+ and modern desktop Chrome with hardware acceleration:

@@ -6,7 +6,10 @@ await mkdir("artifacts", { recursive: true });
 const browser = await chromium.launch({
   executablePath:
     process.env.CHROME_PATH ||
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    // CI uses Playwright's bundled Chromium.
+    (process.env.CI
+      ? undefined
+      : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
   headless: true,
   args: ["--enable-webgl", "--ignore-gpu-blocklist"],
 });
